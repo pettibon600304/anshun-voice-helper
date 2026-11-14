@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#17324d">
+  <title>安順國中｜獨立語音輸入</title>
+  <style>
+    :root{--navy:#17324d;--blue:#245b86;--ink:#1f2937;--muted:#64748b;--line:#dbe3ea;--bg:#f3f6f9;--green:#16734a;--greenbg:#e8f5ee;--red:#b42318;--redbg:#fff0ef;--amber:#946200;--amberbg:#fff7df}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif;line-height:1.55}
+    .wrap{max-width:620px;margin:28px auto;padding:0 14px}.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:0 8px 28px rgba(22,42,60,.08)}
+    .tag{font-size:12px;letter-spacing:.1em;color:var(--muted);font-weight:800}.title{font-size:25px;color:var(--navy);margin:5px 0 4px}.desc{color:var(--muted);font-size:14px;margin:0 0 16px}
+    .fieldlabel{font-weight:800;color:#34465a;margin:18px 0 7px}.field{width:100%;min-height:130px;padding:14px;border:1px solid #cbd5df;border-radius:12px;font:inherit;font-size:20px;resize:vertical;color:var(--ink)}
+    .status{min-height:24px;margin:8px 0;color:var(--muted);font-size:13px}.status.ok{color:var(--green)}.status.err{color:var(--red)}
+    .actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}.btn{border:1px solid transparent;border-radius:11px;padding:12px 16px;min-height:46px;font:inherit;font-weight:800;cursor:pointer;flex:1 1 140px}
+    .primary{background:var(--navy);color:#fff}.secondary{background:#eaf2f8;color:var(--navy);border-color:#d8e5ef}.light{background:#fff;color:#334155;border-color:var(--line)}.danger{background:var(--redbg);color:var(--red);border-color:#f3d1ce}
+    .hint{background:#edf3f8;border-radius:11px;padding:11px 12px;font-size:12px;color:#53677b;margin-top:14px}.hint.warn{background:var(--amberbg);color:#765000}
+    @media(max-width:480px){.wrap{margin:10px auto}.card{padding:17px}.title{font-size:22px}.btn{flex-basis:100%}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <div class="tag">ANSHUN JUNIOR HIGH SCHOOL</div>
+      <h1 class="title">🎤 安順國中語音輸入</h1>
+      <p class="desc" id="fieldDesc">辨識文字完成後，請核對再傳回簽到頁。</p>
+      <div class="fieldlabel" id="fieldLabel">語音文字</div>
+      <textarea id="transcript" class="field" placeholder="辨識結果會出現在這裡；也可以直接修改文字。" spellcheck="false"></textarea>
+      <div id="status" class="status" aria-live="polite">請按「開始辨識」，並允許此網頁使用麥克風。</div>
+      <div class="actions">
+        <button id="startBtn" class="btn primary" type="button">🎙 開始辨識</button>
+        <button id="stopBtn" class="btn secondary" type="button" disabled>停止辨識</button>
+      </div>
+      <div class="actions">
+        <button id="sendBtn" class="btn primary" type="button">傳回簽到頁</button>
+        <button id="clearBtn" class="btn light" type="button">清除文字</button>
+        <button id="cancelBtn" class="btn danger" type="button">取消／關閉</button>
+      </div>
+      <div class="hint">請在此獨立網頁使用麥克風。Edge 的網頁語音辨識可能會將音訊送至 Microsoft 語音服務處理；辨識文字只會透過目前開啟的視窗傳回簽到頁，不會寫入此語音頁的資料庫。</div>
+      <div class="hint warn">若瀏覽器不支援語音辨識，可點文字框後使用 Windows <b>Win + H</b> 語音聽寫，再按「傳回簽到頁」。傳回前請自行核對姓名及職稱。</div>
+    </section>
+  </main>
+<script>
+(() => {
+  'use strict';
+  const params = new URLSearchParams(window.location.search);
+  const field = params.get('field') === 'title' ? 'title' : 'name';
+  let nonce = '';
+  let parentOrigin = '';
+  const label = field === 'name' ? '來賓姓名' : '來賓職稱';
+  const $ = id => document.getElementById(id);
+  const input = $('transcript');
+  const status = $('status');
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  let finalText = '';
+  let lastError = '';
+  let isRunning = false;
+
+  $('fieldLabel').textContent = label;
+  $('fieldDesc').textContent = '本次輸入欄位：' + label + '。辨識完成後請核對，再傳回簽到頁。';
+  // 僅在與開啟本視窗的簽到頁完成 READY/INIT 握手後，才取得一次性 nonce。
+  window.addEventListener('message', event => {
+    if (!window.opener || event.source !== window.opener) return;
+    const message = event.data;
+    if (!message || message.type !== 'ANSHUN_VOICE_INIT' || message.field !== field || !message.nonce) return;
+    nonce = String(message.nonce);
+    parentOrigin = event.origin;
+    setStatus('已與安順國中簽到頁安全連線，可以開始辨識。', 'ok');
+  });
+  if (window.opener && !window.opener.closed) {
+    window.opener.postMessage({ type: 'ANSHUN_VOICE_READY', field: field }, '*');
+  } else {
+    setStatus('找不到原本的簽到頁。請先保持簽到頁開啟，再從姓名或職稱旁的麥克風按鈕開啟此視窗。', 'err');
+  }
+
+  function setStatus(message, kind='') {
+    status.textContent = message;
+    status.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function setRunning(running) {
+    isRunning = running;
+    $('startBtn').disabled = running;
+    $('stopBtn').disabled = !running;
+  }
+
+  function errorText(code) {
+    const map = {
+      'not-allowed': '麥克風或語音辨識權限遭拒。請允許此 GitHub Pages 網站使用麥克風。',
+      'service-not-allowed': '瀏覽器不允許使用語音辨識服務。',
+      'audio-capture': '找不到麥克風，請檢查裝置及 Windows 麥克風設定。',
+      'no-speech': '沒有辨識到語音，請靠近麥克風再試一次。',
+      'network': '語音服務連線失敗，請檢查網路。',
+      'language-not-supported': '瀏覽器不支援 zh-TW 語音辨識。'
+    };
+    return map[code] || ('語音辨識錯誤：' + code);
+  }
+
+  function startRecognition() {
+    if (!nonce || !parentOrigin) { setStatus('尚未與簽到頁完成安全連線，請稍候或重新開啟語音視窗。', 'err'); return; }
+    if (!Recognition) { setStatus('此瀏覽器未提供 Web Speech API。可使用 Win + H 輸入，再按「傳回簽到頁」。', 'err'); input.focus(); return; }
+    if (isRunning) return;
+    lastError = '';
+    finalText = '';
+    recognition = new Recognition();
+    recognition.lang = 'zh-TW';
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => { setRunning(true); setStatus('正在聆聽，請清楚說出' + label + '…'); };
+    recognition.onresult = event => {
+      let finalPart = '';
+      let interimPart = '';
+      for (let i = 0; i < event.results.length; i++) {
+        const item = event.results[i];
+        const phrase = item[0] && item[0].transcript ? item[0].transcript : '';
+        if (item.isFinal) finalPart += phrase;
+        else interimPart += phrase;
+      }
+      finalText = finalPart.trim();
+      input.value = (finalPart + interimPart).trim();
+      if (input.value) setStatus('辨識中，請確認文字是否正確…');
+    };
+    recognition.onerror = event => { lastError = errorText(event.error); };
+    recognition.onend = () => {
+      setRunning(false);
+      if (finalText) {
+        input.value = finalText;
+        setStatus('辨識完成。請核對文字；可直接在文字框修改。', 'ok');
+      } else if (input.value.trim()) {
+        setStatus('已取得暫存文字，請核對後傳回。', 'ok');
+      } else {
+        setStatus(lastError || '沒有取得辨識文字，請再試一次。', 'err');
+      }
+    };
+    try { recognition.start(); }
+    catch (err) { setRunning(false); setStatus('無法啟動辨識：' + err.message, 'err'); }
+  }
+
+  function stopRecognition() {
+    if (recognition && isRunning) {
+      setStatus('正在整理辨識結果…');
+      try { recognition.stop(); } catch (e) {}
+    }
+  }
+
+  function sendToOpener() {
+    const text = input.value.trim();
+    if (!text) { setStatus('目前沒有文字可傳回。請先辨識或輸入文字。', 'err'); return; }
+    if (!nonce || !parentOrigin) { setStatus('安全連線尚未完成，請從簽到頁重新開啟。', 'err'); return; }
+    if (!window.opener || window.opener.closed) {
+      setStatus('找不到原本的簽到頁。請保持簽到頁開啟，再重新點擊麥克風。', 'err');
+      return;
+    }
+    window.opener.postMessage({
+      type: 'ANSHUN_VOICE_RESULT',
+      nonce: nonce,
+      field: field,
+      text: text
+    }, parentOrigin);
+    setStatus('已傳回簽到頁，請切回原視窗確認欄位。', 'ok');
+  }
+
+  function cancelAndClose() {
+    stopRecognition();
+    if (window.opener && !window.opener.closed && nonce && parentOrigin) {
+      window.opener.postMessage({ type: 'ANSHUN_VOICE_CANCEL', nonce: nonce }, parentOrigin);
+    }
+    window.close();
+    setStatus('若視窗未自動關閉，可手動關閉此分頁。');
+  }
+
+  $('startBtn').addEventListener('click', startRecognition);
+  $('stopBtn').addEventListener('click', stopRecognition);
+  $('sendBtn').addEventListener('click', sendToOpener);
+  $('clearBtn').addEventListener('click', () => { input.value = ''; finalText = ''; setStatus('文字已清除，可以重新辨識。'); });
+  $('cancelBtn').addEventListener('click', cancelAndClose);
+
+  if (!Recognition) {
+    setStatus('瀏覽器未提供語音辨識；可使用 Win + H 輸入，再按「傳回簽到頁」。', 'err');
+  }
+})();
+</script>
+</body>
+</html>
