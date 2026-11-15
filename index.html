@@ -26,6 +26,7 @@
 'use strict';
 const params = new URLSearchParams(location.search);
 const requestedField = params.get('field');
+const expectedParentOrigin = params.get('parentOrigin') || '';
 const field = requestedField === 'both' ? 'both' : (requestedField === 'title' ? 'title' : 'name');
 const label = field === 'both' ? '來賓姓名與職稱' : (field === 'name' ? '來賓姓名' : '來賓職稱');
 const $ = id => document.getElementById(id);
@@ -37,7 +38,7 @@ let started = false;
 let finished = false;
 let lastInit = null;
 $('desc').textContent = field === 'both'
-  ? '請一次說出姓名及職稱，例如「黃偉哲，臺南市長」。自然停頓後會自動分欄填入。'
+  ? '請一次說出姓名及職稱，例如「黃偉哲，臺南市長」。自然停頓後會自動分欄填入；若辨識失敗可更新授權後重試。'
   : '本次辨識欄位：' + label + '。說完並自然停頓後，文字會自動送回簽到頁。';
 
 function status(text, kind='') { $('status').textContent = text; $('status').className = 'status' + (kind ? ' ' + kind : ''); }
@@ -47,12 +48,12 @@ function disposeRecognizer() {
   try { if (audioConfig) audioConfig.close(); } catch (e) {}
   recognizer = null; audioConfig = null; started = false;
 }
-function sendToParent(text) {
+function sendToParent(text, candidates=[]) {
   if (!window.opener || window.opener.closed || !nonce || !parentOrigin) {
     status('找不到原本的簽到頁，請回到簽到頁重新點擊欄位。', 'err');
     showRetry(); return;
   }
-  window.opener.postMessage({type:'ANSHUN_VOICE_RESULT', nonce, field, text:String(text || '').trim()}, parentOrigin);
+  window.opener.postMessage({type:'ANSHUN_VOICE_RESULT', nonce, field, text:String(text || '').trim(), candidates:Array.isArray(candidates) ? candidates.slice(0,5) : []}, parentOrigin);
   finished = true;
   $('mic').textContent = '✅';
   $('stateText').textContent = '辨識完成，已回填簽到頁';
@@ -83,7 +84,7 @@ function startAzureRecognition(init) {
     speechConfig.speechRecognitionLanguage = 'zh-TW';
     speechConfig.outputFormat = sdk.OutputFormat.Detailed;
     // 讓短句在自然停頓後較快結束；此值仍需依實際裝置及環境測試。
-    speechConfig.setProperty(sdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, '900');
+    speechConfig.setProperty(sdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, '1200');
     audioConfig = sdk.AudioConfig.fromDefaultMicrophoneInput();
     recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
 
@@ -103,7 +104,14 @@ function startAzureRecognition(init) {
     recognizer.recognizeOnceAsync(result => {
       const text = result && result.text ? result.text.trim() : '';
       if (result && result.reason === sdk.ResultReason.RecognizedSpeech && text) {
-        sendToParent(text);
+        let candidates = [];
+        try {
+          const detail = result.json ? JSON.parse(result.json) : null;
+          candidates = detail && Array.isArray(detail.NBest)
+            ? detail.NBest.map(item => String(item.Display || item.ITN || item.Lexical || '').trim()).filter(Boolean)
+            : [];
+        } catch (e) {}
+        sendToParent(text, candidates);
       } else {
         let detail = '沒有辨識到清楚的語音，請再試一次。';
         try {
@@ -122,10 +130,15 @@ function startAzureRecognition(init) {
 
 window.addEventListener('message', event => {
   if (!window.opener || event.source !== window.opener) return;
+  if (!expectedParentOrigin || event.origin !== expectedParentOrigin) return;
   const msg = event.data;
   if (!msg || typeof msg !== 'object') return;
   if (msg.type === 'ANSHUN_VOICE_ERROR') {
-    if (msg.nonce && (!nonce || msg.nonce === nonce)) sendError(msg.message);
+    if (msg.nonce && (!nonce || msg.nonce === nonce)) {
+      status(String(msg.message || '簽到頁無法取得 Azure 授權。請回到簽到頁重新開啟語音。'), 'err');
+      showRetry();
+      disposeRecognizer();
+    }
     return;
   }
   if (msg.type !== 'ANSHUN_VOICE_INIT' || msg.field !== field || !msg.nonce || !msg.token || !msg.region) return;
@@ -136,15 +149,20 @@ window.addEventListener('message', event => {
   startAzureRecognition(msg);
 });
 
-if (window.opener && !window.opener.closed) {
+if (window.opener && !window.opener.closed && expectedParentOrigin) {
   $('stateText').textContent = '正在連線簽到頁';
-  window.opener.postMessage({type:'ANSHUN_VOICE_READY', field}, '*');
+  window.opener.postMessage({type:'ANSHUN_VOICE_READY', field}, expectedParentOrigin);
 } else {
   status('請先開啟安順國中簽到頁，再點姓名或職稱空白欄位啟動語音。', 'err');
   $('stateText').textContent = '尚未連線';
 }
 $('retryBtn').addEventListener('click', () => {
-  if (lastInit && !finished) startAzureRecognition(lastInit);
+  if (!lastInit || finished || !window.opener || window.opener.closed || !parentOrigin || !nonce) return;
+  $('retryBtn').hidden = true;
+  $('stateText').textContent = '正在更新語音授權';
+  $('mic').textContent = '🔄';
+  status('正在向簽到頁更新短效授權，請稍候…');
+  window.opener.postMessage({type:'ANSHUN_VOICE_RETRY_REQUEST', nonce}, parentOrigin);
 });
 $('cancelBtn').addEventListener('click', () => {
   disposeRecognizer();
